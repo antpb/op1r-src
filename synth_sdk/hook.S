@@ -348,6 +348,33 @@ __hook_usbiso1:
 	.global __hook_ciservice
 __hook_ciservice:
 	call _ci_service;
+/* Disk cleanup (0x01997DE4) deletes every root entry that is not synth, drum, album, or tape, and it
+ * does that before the old copy hook ran, which is why a nam folder vanished and the effect stayed empty.
+ * jump.l into the gate: copy the packs while they are still there, and do not walk the nam folder. */
+	.section .hook_namdel,"ax"
+	.global __hook_namdel
+__hook_namdel:
+	jump.l _nam_del_gate;
+	.text
+	.align 2
+	.global _nam_del_gate
+_nam_del_gate:
+	[--SP] = RETS;
+	[--SP] = R0;
+	[--SP] = R1;
+	SP += -12;
+	call _nam_del_skip;
+	SP += 12;
+	CC = R0 == 0;
+	R1 = [SP++];
+	R0 = [SP++];
+	RETS = [SP++];
+	IF !CC JUMP 1f;
+	LINK 0x58;
+	jump.l _nam_del_resume;
+1:
+	R0 = 0;
+	RTS;
 	.section .hook_taperase,"ax"
 	.global __hook_taperase
 __hook_taperase:

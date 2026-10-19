@@ -27,7 +27,7 @@ def load():
         if not os.path.isfile(pj):
             continue
         p = json.load(open(pj))
-        rel = lambda f: os.path.join('plugins', d, f)
+        rel = lambda f: os.path.normpath(os.path.join('plugins', d, f))
         e = {k: v for k, v in p.items() if k not in ('kind', 'sources')}
         e['source'], e['extra_sources'] = rel(p['sources'][0]), [rel(s) for s in p['sources'][1:]]
         if p.get('screen'):

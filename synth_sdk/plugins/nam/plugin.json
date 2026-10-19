@@ -1,0 +1,20 @@
+{
+  "name": "nam input",
+  "kind": "fx",
+  "order": 9,
+  "symbol": "FX_naminput",
+  "sources": [
+    "naminput.c",
+    "nam.c"
+  ],
+  "defaults": [
+    16384,
+    32767,
+    22000,
+    23170
+  ],
+  "screen": {
+    "svg": "naminput.svg",
+    "symbol": "SCREEN_naminput"
+  }
+}

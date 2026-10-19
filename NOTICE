@@ -35,3 +35,6 @@ THIRD-PARTY CODE (MIT License, compatible with the GPL; their notices are kept)
   (https://github.com/op1hacks/op1repacker).
 - svgfont.py and the Oblique Strategies idea: (c) 2026 Martin Mairinger, MIT License
   (https://github.com/ultralazr/op1-oblique-strategies).
+- synth_sdk/plugins/nam: fixed-point ports of the LSTM and A2 WaveNet models of NeuralAmpModelerCore,
+  (c) 2023-2025 Steven Atkinson, MIT License (https://github.com/sdatkinson/NeuralAmpModelerCore). The .nam
+  capture files in plugins/nam/models are data with their own authors and terms, not covered by this license.

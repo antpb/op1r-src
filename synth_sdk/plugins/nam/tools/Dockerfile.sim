@@ -1,0 +1,7 @@
+FROM bfin-elf-toolchain
+RUN apt-get update && apt-get install -y libexpat1-dev zlib1g-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN wget -q https://ftp.gnu.org/gnu/gdb/gdb-13.2.tar.xz && tar xf gdb-13.2.tar.xz \
+ && mkdir bs && cd bs && ../gdb-13.2/configure --target=bfin-elf --prefix=/opt/bfin --disable-nls --disable-werror --disable-gdb --disable-gdbserver --disable-binutils --disable-ld --disable-gas --disable-gprof --enable-sim \
+ && make -j16 all-sim && make install-sim && cd .. && rm -rf bs gdb-13.2*
+WORKDIR /work

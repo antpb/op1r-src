@@ -40,12 +40,22 @@ void synth_note_on(void *self, const int16_t *params)
 /* per-voice output peak of stock iter voices (screens/iterlab.c), Q15, written once per block */
 volatile int16_t op1_iter_level[6];
 
+/* plugins/nam stamps op1_audio_blocks each block it replaces the synth FX input with the line input. The
+ * voices are then never heard: skip them while the stamp is from this block or the last one (the order of the
+ * voice and FX renders inside one block does not matter). */
+extern volatile uint32_t nam_synth_stamp __attribute__((weak));
+
 void synth_render(void *self, int16_t *out, const int16_t *params)
 {
     int v = op1_voice_index(self), e = engine_of(params);
     if (e != voice_engine[v]) {                       /* engine switched while voice alive */
         voice_engine[v] = (uint8_t)e;
         if (e) op1_engines[e]->note_on(self, params); else ITER_NOTE_ON(self, params);
+    }
+    if (&nam_synth_stamp && op1_audio_blocks - nam_synth_stamp <= 1u) {
+        for (int i = 0; i < OP1_BLOCK; i++) out[i] = 0;
+        op1_iter_level[v] = 0;
+        return;
     }
     if (e) { op1_engines[e]->render(self, out, params); op1_iter_level[v] = 0; return; }
     ITER_RENDER(self, out, params);
@@ -420,7 +430,8 @@ int lfo_range_ok(int type, int i, const int16_t *v)
 /* Sounds store the FX by name; an unknown name asserts in fx_types.cpp:42 ("unknown fx name") and the OP-1 locks at
  * boot. Names of renamed custom FX stay accepted here, so sounds saved before a rename still load (the FX itself is
  * picked by the selector word, knobs[4] = MAGIC + order, which a rename keeps). */
-static const char *const fx_old_names[] = { "sitting", 0 };          /* -> "in a room" (order 7) */
+static const char *const fx_old_names[] = { "sitting", "nam", 0 };   /* "sitting" -> "in a room" (order 7);
+                                                                       * "nam" was a second FX beside "nam input" */
 int fx_name_eq(const char *name, const dstring *s)
 {
     const char *p = s->cap > 15 ? s->u.ptr : s->u.buf;
@@ -777,6 +788,7 @@ static int current_fx(void)                 /* custom FX index of the shown FX, 
 #define KNOB_DISPATCH  ((void (*)(int, int16_t *))0x019B6C0C)
 #define CURRENT_SCREEN (*(volatile int *)0x018B65C8)
 volatile uint8_t op1_fx_page[3][4];
+volatile uint8_t op1_fx_step[3][4];
 static int quad_lfo_page(void);                /* quad LFO page helpers (defined below) */
 static int lfo_page_pos(void);
 static int lfo_page_slot(int pos);
@@ -999,6 +1011,10 @@ void key_event_hook(int code, int pressed)
         if (e) {
             int k = press_knob[code - 0x3B];
             uint8_t mode = op1_fxs[e]->press[k];
+            if (mode == OP1_PRESS_STEP) {
+                if (pressed) op1_fx_step[op1_fx_screen_pos()][k]++;
+                return;
+            }
             if (mode) {                                  /* handled: swallow press and release */
                 if (pressed) op1_fx_page[op1_fx_screen_pos()][k] ^= 1;
                 return;

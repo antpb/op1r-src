@@ -151,6 +151,8 @@ int ci_service(int arg)
         ((int (*)(int))0x01A54710)(arg);
 #endif
     pu_service();                                                 /* punch in / out (main loop) */
+    extern void nam_disk_poll(void) __attribute__((weak));
+    if (nam_disk_poll) nam_disk_poll();                           /* nam profiles, from the copy made at boot */
     extern void du_service(void) __attribute__((weak));
     if (du_service) du_service();                                 /* dev update over SysEx (--dev, docs/35) */
     if (ci_play_req) {

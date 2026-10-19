@@ -35,9 +35,22 @@ static inline uint32_t READ_CYCLES(void) { uint32_t c; __asm__ volatile ("%0 = C
 
 /* ---------------- sources ---------------- */
 static volatile uint32_t aud_busy, aud_max, aud_last_t0, aud_max_period;   /* ISR side, reset by the GUI */
+/* Live input for plugins (op1_plugin.h op1_audio_input): the callback gets (out block, in block, ?), 64 frames of
+ * (L, R) 32-bit words each (the firmware's audio test mode 0x0191A7A8 copies in -> out; its tone mode 0x0191A880
+ * writes out = R0). The in block is copied here, before the firmware's render can touch it, when a plugin asks. */
+volatile uint8_t op1_audio_in_on;
+const void *volatile op1_audio_in_src;
+int32_t op1_audio_in[128];
+volatile uint32_t op1_audio_blocks;
 void sm_audio_cb(void *a, void *b, void *c)                  /* replaces the callback pointer (audio::init) */
 {
     uint32_t t0 = READ_CYCLES();
+    op1_audio_blocks++;
+    if (op1_audio_in_on && b) {
+        const int32_t *in = (const int32_t *)b;
+        for (int i = 0; i < 128; i++) op1_audio_in[i] = in[i];
+        op1_audio_in_src = b;
+    }
     AUDIO_CB(a, b, c);
     uint32_t d = READ_CYCLES() - t0, p = t0 - aud_last_t0;
     aud_last_t0 = t0;
@@ -68,6 +81,10 @@ extern volatile uint32_t ps_prof[7] __attribute__((weak));
 static uint32_t prof_last[7];
 static int32_t prof_pct[7];
 extern volatile uint32_t dp_prof[2] __attribute__((weak));   /* drum+ voice render cycles (drumplus/dp_fw.c) */
+extern volatile uint32_t nam_diag[4] __attribute__((weak));  /* nam input source (plugins/nam): addr, word, low bits, resyncs */
+extern volatile uint32_t nam_prof[3] __attribute__((weak));  /* nam FX cycles, blocks the model ran, blocks (plugins/nam) */
+static uint32_t nd[4], np_last[3];
+static int32_t np_pct, np_pk, np_run;
 static uint32_t dp_last[2];
 static int32_t dp_pct[2], dp_pk[2];
 
@@ -101,6 +118,17 @@ static void sample_fast(void)                                /* CPU, AUDIO, MIDI
         for (int i = 0; i < 7; i++) { uint32_t c = ps_prof[i]; prof_pct[i] = pct(c - prof_last[i], wall); prof_last[i] = c; }
     if (dp_prof)
         for (int i = 0; i < 2; i++) { uint32_t c = dp_prof[i]; dp_pct[i] = pct(c - dp_last[i], wall); dp_last[i] = c; peak(&dp_pk[i], dp_pct[i]); }
+    if (nam_diag) {                                          /* hold the largest word / bits since the last sample */
+        nd[0] = nam_diag[0]; nd[1] = nam_diag[1]; nd[2] = nam_diag[2]; nd[3] = nam_diag[3];
+        nam_diag[1] = 0; nam_diag[2] = 0; nam_diag[3] = 0;
+    }
+    if (nam_prof) {
+        uint32_t c = nam_prof[0], ran = nam_prof[1], blk = nam_prof[2];
+        np_pct = pct(c - np_last[0], wall);
+        peak(&np_pk, np_pct);
+        if (blk != np_last[2]) np_run = pct(ran - np_last[1], blk - np_last[2]);
+        np_last[0] = c; np_last[1] = ran; np_last[2] = blk;
+    }
     uint32_t busy = aud_busy, mx = aud_max, mp = aud_max_period;
     aud_busy = 0; aud_max = 0;
     v_pct[SM_DSP] = pct(busy, wall);
@@ -272,6 +300,26 @@ static void sm_update(void *scr, int dt)
             op1_text_set(txt_mem[2 * SM_ROWS + 2], t);
             shown = op1_db_last_err;
         }
+        op1_text_draw(txt_mem[2 * SM_ROWS + 2], r, ident);
+    }
+    /* "nam 21 pk30 run100 a370 s34": % of the audio time (now, peak), % of blocks the model ran (the rest slept),
+     * then the input block address (hex) and resyncs when nam input is live */
+    if (!dp_line && !ps_prof && ((nam_diag && nd[0]) || (nam_prof && np_pk))) {
+        static const char hx[] = "0123456789abcdef";
+        char t[48], *q = put_s(t, "nam ");
+        q = put_u(q, (uint32_t)np_pct);
+        q = put_s(q, " pk"); q = put_u(q, (uint32_t)np_pk);
+        q = put_s(q, " run"); q = put_u(q, (uint32_t)np_run);
+        if (nam_diag && nd[0]) {
+            q = put_s(q, " a");
+            for (int i = 8; i >= 0; i -= 4) *q++ = hx[(nd[0] >> i) & 15];
+            q = put_s(q, " s"); q = put_u(q, nd[3]);
+        }
+        *q = 0;
+        static char lastn[48];
+        int k = 0;
+        while (t[k] && t[k] == lastn[k]) k++;
+        if (t[k] != lastn[k]) { op1_text_set(txt_mem[2 * SM_ROWS + 2], t); for (k = 0; (lastn[k] = t[k]) != 0; k++) ; }
         op1_text_draw(txt_mem[2 * SM_ROWS + 2], r, ident);
     }
     if (ps_prof) {                                           /* "paul 41 f12 m5 s9 b1 i12 o2" (% of the audio time) */

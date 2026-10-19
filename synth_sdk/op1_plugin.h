@@ -136,16 +136,29 @@ static inline volatile int16_t *op1_fx_meter(int pos) { return (volatile int16_t
 typedef struct {
     void (*init)(int pos);                                         /* FX (re)created at pos      */
     void (*render)(int pos, int16_t *buf, const int16_t *params);   /* 64 samples, in place       */
-    uint8_t press[4];        /* encoder press per knob (blue..red): OP1_PRESS_NONE / _PAGE / _LATCH */
+    uint8_t press[4];        /* encoder press per knob (blue..red): OP1_PRESS_NONE / _PAGE / _LATCH / _STEP */
 } op1_fx_t;
 /* Encoder presses on a custom FX page (dispatcher.c hooks the KeyHandler dispatch):
  *  OP1_PRESS_PAGE : press toggles the knob between its normal parameter (params[k]) and a second
  *                   parameter in params[5 + k] (k = 0..2 only: words 5..7, 0..32767, saved with the patch)
  *  OP1_PRESS_LATCH: press toggles a flag (not saved), e.g. freeze
+ *  OP1_PRESS_STEP : each press increments op1_fx_step[pos][k] (not saved). The turn still edits params[k].
  * State per FX position (0 synth, 1 drum, 2 master): op1_fx_page[pos][k] = 1 while page 2 / latch is on.
  * FX state must be kept per position 0..2 (the master can run the same custom FX as an instrument). */
-enum { OP1_PRESS_NONE = 0, OP1_PRESS_PAGE = 1, OP1_PRESS_LATCH = 2 };
+enum { OP1_PRESS_NONE = 0, OP1_PRESS_PAGE = 1, OP1_PRESS_LATCH = 2, OP1_PRESS_STEP = 3 };
 extern volatile uint8_t op1_fx_page[3][4];
+extern volatile uint8_t op1_fx_step[3][4];
+
+/* ---- live audio input (line / mic as the codec has it) ----
+ * Set op1_audio_in_on = 1 (e.g. in render) and from the next audio callback on, op1_audio_in[] holds this callback's
+ * input block: 64 frames of (L, R), 32-bit words, MSB aligned (sample = word >> 16), copied at the start of the
+ * callback (screens/sysmon.c sm_audio_cb). An FX render runs inside the callback, so it reads the current block. */
+#ifndef OP1_HOST
+extern volatile uint8_t op1_audio_in_on;
+extern const void *volatile op1_audio_in_src;               /* the codec block it was copied from (diagnostics) */
+extern int32_t op1_audio_in[128];
+extern volatile uint32_t op1_audio_blocks;                  /* audio callbacks so far (one per 64-sample block) */
+#endif
 
 /* ---- beat clock (read-only; read it once per render block, never per sample) ----
  * The stock metronome's beat clock (metronome.cpp state at 0x01AADABC; tape/countin.c counts in on it). It runs
