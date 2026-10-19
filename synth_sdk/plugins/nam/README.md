@@ -103,7 +103,8 @@ lower in frequency.
 after the histories; the loader turns it into the model and the weight streams the kernel reads, also in the
 scratch. Up to 16 packs can sit in the `nam` folder; only the selected one is loaded. Switching discards it and
 reads the next. The host bench (`-DNAM_BAKED`) has the same pack bytes in `nam_models.h` and parses them the same
-way. The LSTM path (1.5 KB plus 4 KB of tables) is only compiled there, when a baked model needs it.
+way. The LSTM path (1.5 KB plus 4 KB of tables) is compiled only for that bench, when a baked model needs it.
+The firmware image has no room for those tables; see below.
 
 ## Fixed point (A2)
 
@@ -148,34 +149,67 @@ model sits exactly at its steady state, so there is no idle hiss.
 ## CPU
 
 From `tools/bench.sh`, the gdb Blackfin simulator (`bfin-elf-run`), reading the CYCLES register around
-`render()`:
+`render()`. The four baked models are all A2 nano and land on the same count:
 
 | | cycles / sample | 400 MHz |
 |---|---|---|
-| A2 nano, playing | 1 884 | **20.7 %** |
-| A2 nano, silent input (model asleep) | 54 | 0.6 % |
-| LSTM 1×3 (for comparison) | 605 | 6.6 % |
+| playing | 1 884 | **20.7 %** |
+| silent input, model asleep | 54 | 0.6 % |
 
-Per frame, a K = 6 layer takes 70 cycles and a K = 15 layer 115 (1 717 for all 23); the input, head and output
-stages take the rest. The first kernel took 2 877 cycles (31.7 %): about 70 instructions per layer and frame
-went to bias loads, the head-sum read-modify-write and load-use stalls.
+The first kernel was 2 877 cycles (31.7 %). A per-layer profile of the current one, same simulator:
 
-**Sleep.** Once the model has taken in zeros for its whole receptive field (Σ (K − 1)·D + 15 = 6 346 samples,
-~144 ms), every history sits at the integer steady state and the head output is a constant. Blocks of exact zeros
-after that skip the model and only run the DC blocker, tone and level on that constant: bit-identical output
-(`tools/bench.sh` checks it against a build that never sleeps, `-DNAM_NO_REST`). With the gate on, the model's
-input is exact zeros once the gate has closed, so pauses between phrases cost almost nothing.
+| | cycles / frame |
+|---|---|
+| one K = 6 layer (21 of the 23) | 70 |
+| one K = 15 layer (2 of the 23) | 115 |
+| all 23 layers | 1 717 |
+| whole model, including input, head and output | 1 905 |
 
-**This is still heavy.** op1r's plugins aim at ~8 %. The simulator also has no SDRAM wait states, and the
-histories live in SDRAM, so the real load is probably higher. **Check it on the T1 resource monitor (the `nam`
-line) before relying on it.** If the total goes over 100 %, the OP-1 can lock up until it is switched off. The
-FX only runs while it is selected.
+The 1 905 is one profiled block of the model, still inside the fade-in. The 1 884 is `render()` averaged
+over steady blocks, after the fade, and it includes the DC blocker, tone and level.
+
+Five changes make up the drop from 31.7 %, and they are the balance to keep. Each one is bit-exact with
+`a2model.run_int` (`compare.py` with no `--ref`).
+
+1. **The layer loop** (`layer_a2`, Blackfin). One hardware loop per layer, 5K + 38 instructions a frame.
+   Biases are the first words of the stream and seed the accumulators. The head sum is updated in the same
+   instructions as the stores. The old loop spent about 70 instructions a frame on bias loads, a head-sum
+   read-modify-write and load-use stalls, against about 30 for the taps.
+2. **Exact-length rings.** (K − 1)·D + 64 entries, 7 803 in total, 61 KB. Power-of-two rings were 104 KB, and
+   every block streamed the padding through the cache. The DAG circular buffers take any length, so the
+   rounding was pure traffic. A model change now fills in about 6 ms.
+3. **16-bit multiply and saturate** on the input, the head and the output (`mul16`, `sat16` in `nam.c`). gcc
+   was emitting a 32×32 multiply, which is several cycles on this core, and a compare plus two branches for
+   each saturation. The simulator counts every instruction as one cycle and models no stalls, so it shows this
+   fix as 2 024 → 1 884 (22.3 % → 20.7 %). On the device the 32×32 multiply is the expensive one, and the
+   saving is larger than that gap.
+4. **Sleep.** After 6 346 zero samples (Σ (K − 1)·D + 15, about 144 ms) every history is the integer steady
+   state and the head output is the constant `yrest`. Later all-zero blocks skip the model and run the DC
+   blocker, tone and level on that constant. `tools/bench.sh` checks the hash against a build that never
+   sleeps (`-DNAM_NO_REST`). The gate multiplies the model input, so a closed gate is exact zeros and a pause
+   between phrases costs the 0.6 %. The gate off leaves the hiss filter in the path, the input is never exact
+   zeros, and the model never sleeps.
+5. **The slot's synth is not rendered** while `nam input` is the synth FX. Its output was discarded. Each
+   block the effect stores `op1_audio_blocks` in `nam_synth_stamp`, and `synth_render` (`dispatcher.c`) writes
+   silence while that stamp is this block or the previous one. The one-block window is there because the voice
+   render and the FX render can run in either order inside one block. The 1 884 above is the effect alone;
+   the voices used to run on top of it. This is the part that was making tape recording hitch. It covers the
+   synth FX position only. On the master FX the dry synth is part of the mix, and the voices still run.
+
+**20.7 % while a note is sounding is still heavy.** op1r's plugins aim at about 8 %. The layer loop is close
+to the multiply count (2 cycles a tap for output 2, 3 for outputs 0 and 1), so a faster kernel is not where
+the next saving is. A smaller capture is. A standard WaveNet is about 15 000 multiplies a sample and does not
+fit. The simulator has no SDRAM waits, the histories live in SDRAM, and the real load is higher than the
+table. **Read the T1 `nam` line on the device before relying on it**, including while recording to tape. If
+the audio callback goes over 100 % the OP-1 can lock up until it is switched off. The effect runs only while
+it is selected.
 
 ## Files and checks
 
 | file | |
 |---|---|
-| `nam.c` | the plugin |
+| `plugin.json`, `naminput.c`, `naminput.svg` | the listed effect: screen, and the live-input entry |
+| `nam.c` | the amp, the pack loader, the bench entry `FX_nam` |
 | `gen_model.py` | `models/*.nam` → `nam_models.h` (host bench) and `packs/N.nam` (what the OP-1 loads) |
 | `a2model.py` | A2: float reference, calibration, conversion, integer reference |
 | `compare.py [--ref <namraw>] [--di wav]` | accuracy against NAM core, plus bit-exactness against `run_int` (only that without `--ref`) |
@@ -194,7 +228,48 @@ docker build -t bfin-elf-sim -f plugins/nam/tools/Dockerfile.sim plugins/nam/too
 
 (The shim maps `Eigen::placeholders::lastN` onto older Eigens; drop it with a current Eigen.)
 
-## Not done
+## For the next firmware change
 
-- 48 kHz captures run at 44.1 kHz.
-- CPU: see above. The pack is read from the disk into scratch, so the weights are no longer in the code image.
+**The code image is full.** Custom code is linked at `0x01E00000` and has to end before `0x01E40000`
+(`CODE_LIMIT` in `make_firmware.py`, `__image_end` in `link.ld`, docs/30). Another project's module starts
+at that address, and the pack step asserts. With this effect in the tree the loaded image (`.text` +
+`.rodata` + `.data`) ends **324 bytes** below the limit. Before the faster layer loop there was about 2 KB
+free; the assembly and the input/head path took roughly 1.7 KB of it. `.bss` is a different region, at
+`0x01EC0000`, and still has room under `0x01EF0000`. The tight one is the loaded image.
+
+That is why the weights are a 5.5 KB pack on disk, parsed into the FX scratch (`OP1_FX_SCRATCH_BYTES`,
+176 460 bytes per position), and why the LSTM activation tables exist only in the host bench. A new plugin,
+a table, or an unrolled copy of this loop will fail the firmware build. Anything big has to replace code
+already in the image, or live in scratch or on disk.
+
+Things that took a while to learn, and that a later change can break quietly:
+
+- **gcc widens 16-bit multiplies.** On the per-sample path, write the multiply and the saturate as the
+  Blackfin 16-bit ops (`mul16`, `sat16`). A C multiply of two `int16_t` values becomes a 32×32 multiply,
+  several cycles, and the simulator still counts it as one. The same applies to a saturate written as two
+  compares.
+- **Inline asm.** `P5` is the PIC register; clobbering it fails the compile. `L0`, `L1` and `L2` have to be
+  0 on the way out, or later circular addressing in the firmware fires on a stale length. The accumulator
+  extract is `A0` into an even register and `A1` into an odd one.
+- **The simulator is a floor.** `bfin-elf-run` counts one cycle per instruction and models no memory waits.
+  The histories are in SDRAM. The number to trust is the T1 `nam` line while the OP-1 is recording.
+- **Sleep is exact, and only on exact zeros.** It is safe because the integer model really does sit on
+  `yrest` after one receptive field of zeros. Shortening that (6 346 samples) or sleeping on "quiet" input
+  changes the sound. `tools/bench.sh` is the check: its hash has to match the `-DNAM_NO_REST` build.
+- **The three implementations have to stay in lockstep.** `a2model.run_int`, the C `layer_a2`, and the
+  assembly. LeakyReLU uses the Blackfin's convergent rounding (ties to even), and both other copies repeat
+  it. `tools/layer_test.sh` compares every written history word, including across the ring wrap.
+- **The voice skip is a one-block window on purpose.** `nam_synth_stamp` against `op1_audio_blocks`, tested
+  with `<= 1`, because the voice and the FX can be ordered either way inside a block. Tightening it to the
+  current block makes the synth render on every other block. It is wired for the synth FX position only.
+
+Still open:
+
+- Nothing here has been timed on the OP-1. The 20.7 % and the 0.6 % are simulator floors. Confirm on T1,
+  with tape recording the effect output, before treating the recording hitch as fixed.
+- While a note is sounding the effect is still about 21 %. The next saving is a smaller model. The kernel
+  is already close to the multiply count, and there is no code space to grow it.
+- Captures are 48 kHz and play at 44.1 kHz, so the response sits about 8 % low. A resampler does not fit
+  in the image or the budget.
+- With the gate off, the model never sleeps.
+- On the master FX, the slot's voices still render.
